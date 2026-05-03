@@ -434,15 +434,18 @@ UNIT
     warn "claude-rc.service installed but not active — likely needs Anthropic auth (claude login or ANTHROPIC_API_KEY)"
   fi
 
-  # Also: a watchdog timer to restart the tmux session if claude exits inside it
+  # Watchdog: restart claude-rc if no `claude remote-control` process is running
+  # as user `claude` (the user the service runs as). Filtering pgrep to that
+  # user is critical — without it, pgrep matches its own bash command line and
+  # always thinks claude is alive.
   $SUDO tee /etc/systemd/system/claude-rc-watchdog.service >/dev/null <<UNIT
 [Unit]
-Description=Restart claude-rc.service if claude exited inside the tmux session
+Description=Restart claude-rc.service if no claude remote-control process is running as user claude
 After=claude-rc.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '$TMUX_BIN has-session -t claude-rc 2>/dev/null && $TMUX_BIN list-panes -t claude-rc -F "#{pane_dead}" | grep -q 1 && /bin/systemctl restart claude-rc.service || true'
+ExecStart=/bin/bash -c "pgrep -u claude -f 'claude remote-control' >/dev/null || /bin/systemctl restart claude-rc.service"
 UNIT
   $SUDO tee /etc/systemd/system/claude-rc-watchdog.timer >/dev/null <<UNIT
 [Unit]
