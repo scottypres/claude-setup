@@ -311,36 +311,45 @@ else
 fi
 
 # =============================================================================
-# Anthropic API key — fetch from 1P, persist in /etc/claude-runner.env (Linux)
+# Persist credentials from 1P into env (Linux: /etc/claude-runner.env; Mac: print)
 # =============================================================================
+# Helper: resolve a 1P item's password OR credential field, persist to runner env
+# on Linux or print export hint on Mac. Idempotent.
+persist_env_from_1p() {
+  local var_name="$1" item_title="$2"
+  local val
+  val=$(op_read_field "$item_title" password) || \
+  val=$(op_read_field "$item_title" credential) || \
+  val=""
+  if [ -z "$val" ]; then
+    warn "No 1P item titled '$item_title' in vault '$OP_VAULT' — skipping $var_name"
+    return 1
+  fi
+  if [ "$PLATFORM" = linux ]; then
+    $SUDO sed -i "/^${var_name}=/d" "$RUNNER_ENV" 2>/dev/null || true
+    printf '%s=%s\n' "$var_name" "$val" | $SUDO tee -a "$RUNNER_ENV" >/dev/null
+    $SUDO chmod 600 "$RUNNER_ENV"
+    export "$var_name=$val"
+    ok "$var_name persisted in $RUNNER_ENV (mode 600)"
+  else
+    ok "$var_name available in 1P. To export in your shell, add to ~/.zshrc:"
+    echo "    export $var_name=\$(op item get '$item_title' --vault '$OP_VAULT' --fields password --reveal 2>/dev/null)"
+  fi
+  unset val
+}
+
 log "=== Anthropic API key ==="
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   ok "ANTHROPIC_API_KEY already set in env"
 else
-  if KEY_VAL=$(op_read_field "$ANTHROPIC_KEY_TITLE" credential) && [ -n "$KEY_VAL" ]; then
-    : "key found via 'credential' field"
-  elif KEY_VAL=$(op_read_field "$ANTHROPIC_KEY_TITLE" password) && [ -n "$KEY_VAL" ]; then
-    : "key found via 'password' field"
-  fi
-  if [ -n "${KEY_VAL:-}" ]; then
-    if [ "$PLATFORM" = linux ]; then
-      log "Persisting ANTHROPIC_API_KEY in $RUNNER_ENV"
-      $SUDO sed -i '/^ANTHROPIC_API_KEY=/d' "$RUNNER_ENV" 2>/dev/null || true
-      printf 'ANTHROPIC_API_KEY=%s\n' "$KEY_VAL" | $SUDO tee -a "$RUNNER_ENV" >/dev/null
-      $SUDO chmod 600 "$RUNNER_ENV"
-      export ANTHROPIC_API_KEY="$KEY_VAL"
-      ok "ANTHROPIC_API_KEY persisted in $RUNNER_ENV (mode 600)"
-    else
-      ok "Anthropic key found in 1P. To use, add to your shell rc:"
-      echo "    export ANTHROPIC_API_KEY=\$(op item get '$ANTHROPIC_KEY_TITLE' --vault '$OP_VAULT' --fields credential --reveal 2>/dev/null)"
-    fi
-    unset KEY_VAL
-  else
-    warn "No 1P item titled '$ANTHROPIC_KEY_TITLE' in vault '$OP_VAULT'"
-    warn "Either: store an Anthropic API key in 1P with that title (field 'credential' or 'password'),"
-    warn "        or run 'claude login' interactively after this script."
-  fi
+  persist_env_from_1p "ANTHROPIC_API_KEY" "$ANTHROPIC_KEY_TITLE" || true
 fi
+
+log "=== GitHub Personal Access Token (env injection) ==="
+persist_env_from_1p "GITHUB_PERSONAL_ACCESS_TOKEN" "$GH_PAT_TITLE" || true
+
+log "=== Vercel token (env injection) ==="
+persist_env_from_1p "VERCEL_TOKEN" "$VERCEL_TOKEN_TITLE" || true
 
 # =============================================================================
 # Linux only: install systemd service for always-running claude --remote-control
@@ -352,8 +361,13 @@ if [ "$PLATFORM" = linux ]; then
   log "claude binary: $CLAUDE_BIN"
   log "tmux binary:   $TMUX_BIN"
 
-  # Session-name prefix: defaults to "Hetzner" for unattended servers; override via env.
-  RC_SESSION_PREFIX="${RC_SESSION_PREFIX:-Hetzner}"
+  # Session naming: default to none (claude uses hostname as prefix). Override
+  # by setting RC_SESSION_PREFIX before running setup. Or rename sessions
+  # manually inside the running claude UI.
+  RC_PREFIX_ARG=""
+  if [ -n "${RC_SESSION_PREFIX:-}" ]; then
+    RC_PREFIX_ARG="--remote-control-session-name-prefix $RC_SESSION_PREFIX"
+  fi
   $SUDO tee /etc/systemd/system/claude-rc.service >/dev/null <<UNIT
 [Unit]
 Description=Claude Code Remote Control session (in tmux)
@@ -365,7 +379,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/root
 EnvironmentFile=$RUNNER_ENV
-ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN remote-control --remote-control-session-name-prefix $RC_SESSION_PREFIX 2>&1 | tee -a /var/log/claude-rc.log'
+ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN remote-control $RC_PREFIX_ARG 2>&1 | tee -a /var/log/claude-rc.log'
 ExecStop=$TMUX_BIN kill-session -t claude-rc
 User=root
 
@@ -414,19 +428,30 @@ fi
 echo
 ok "Setup complete."
 echo
+echo "===================================================================="
+echo "  ONE-TIME MANUAL STEP REMAINING — Anthropic auth"
+echo "===================================================================="
+echo "  Run this command in your terminal:"
+echo
+echo "      claude auth login --claudeai"
+echo
+echo "  It will print a URL. Open it on any device, sign in with your"
+echo "  claude.ai subscription account, paste the code back at the >"
+echo "  prompt. After it finishes, claude is fully authenticated."
+echo "===================================================================="
+echo
 if [ "$PLATFORM" = linux ]; then
-  echo "Hetzner-style setup notes:"
-  echo "  • /etc/claude-runner.env holds OP_SERVICE_ACCOUNT_TOKEN (and ANTHROPIC_API_KEY if found)."
-  echo "  • claude-rc.service runs 'claude remote-control' in tmux; check with:"
-  echo "      systemctl status claude-rc"
-  echo "      tmux attach -t claude-rc      (Ctrl+b d to detach)"
-  echo "      journalctl -u claude-rc -f"
-  echo "      tail -f /var/log/claude-rc.log"
-  echo "  • To restart: sudo systemctl restart claude-rc"
+  echo "After auth, Hetzner-style notes:"
+  echo "  • /etc/claude-runner.env holds your tokens (OP, GitHub PAT, Vercel, Anthropic)"
+  echo "  • claude-rc.service is already enabled and running in tmux"
+  echo "  • Inspect:  systemctl status claude-rc"
+  echo "              tmux attach -t claude-rc    (Ctrl+b d to detach)"
+  echo "              tail -f /var/log/claude-rc.log"
+  echo "  • Restart:  sudo systemctl restart claude-rc"
+  echo "  • The Remote Control session shows up in your phone's Claude app."
+  echo "    To rename a session, do it inside the live claude session UI."
 else
-  echo "Mac next steps:"
-  echo "  1. claude login                                  (one-time Anthropic OAuth in browser)"
-  echo "  2. claude                                        (start a session)"
-  echo "  3. /config inside Claude Code → enable Remote Control by default if not already"
-  echo "  4. Anthropic mobile app → your local session should appear in the picker"
+  echo "After auth, Mac steps:"
+  echo "  1. claude              (start a session; enable Remote Control via /config)"
+  echo "  2. Anthropic mobile app → your local session should appear in the picker"
 fi
