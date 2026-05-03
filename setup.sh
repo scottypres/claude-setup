@@ -397,7 +397,7 @@ echo
 if [ "$PLATFORM" = linux ]; then
   echo "Hetzner-style setup notes:"
   echo "  • /etc/claude-runner.env holds OP_SERVICE_ACCOUNT_TOKEN (and ANTHROPIC_API_KEY if found)."
-  echo "  • claude-rc.service runs 'claude --remote-control' in tmux; check with:"
+  echo "  • claude-rc.service runs 'claude remote-control' in tmux; check with:"
   echo "      systemctl status claude-rc"
   echo "      tmux attach -t claude-rc      (Ctrl+b d to detach)"
   echo "      journalctl -u claude-rc -f"
