@@ -345,7 +345,7 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=$RUNNER_ENV
-ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN --remote-control 2>&1 | tee -a /var/log/claude-rc.log'
+ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN remote-control 2>&1 | tee -a /var/log/claude-rc.log'
 ExecStop=$TMUX_BIN kill-session -t claude-rc
 User=root
 
@@ -376,8 +376,8 @@ UNIT
 Description=Periodic check on claude-rc tmux session
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
+OnBootSec=30s
+OnUnitActiveSec=30s
 Unit=claude-rc-watchdog.service
 
 [Install]
