@@ -12,9 +12,14 @@ err()  { printf '%s[%s] ERR%s  %s\n' "$c_red"    "$(date +%H:%M:%S)" "$c_off" "$
 ok()   { printf '%s[%s] OK%s   %s\n' "$c_green"  "$(date +%H:%M:%S)" "$c_off" "$*"; }
 
 # --- overrideable config ---
-SA_TOKEN_REF="${SA_TOKEN_REF:-op://Development/1Password — Service Account Token/password}"
-GH_PAT_REF="${GH_PAT_REF:-op://Development/GitHub — Personal Access Token/password}"
-VERCEL_TOKEN_REF="${VERCEL_TOKEN_REF:-op://Development/Vercel — Personal Access Token/password}"
+# References use item TITLES which contain em-dashes. op CLI rejects em-dashes
+# in op:// references (commit https://github.com/1Password/op-cli/...), so the
+# script looks up items by title via `op item list` and uses the resolved IDs.
+SA_TOKEN_TITLE="${SA_TOKEN_TITLE:-1Password — Service Account Token}"
+GH_PAT_TITLE="${GH_PAT_TITLE:-GitHub — Personal Access Token}"
+VERCEL_TOKEN_TITLE="${VERCEL_TOKEN_TITLE:-Vercel — Personal Access Token}"
+ANTHROPIC_KEY_TITLE="${ANTHROPIC_KEY_TITLE:-Anthropic — API Key}"
+OP_VAULT="${OP_VAULT:-Development}"
 CLAUDE_JSON="${CLAUDE_JSON:-$HOME/.claude.json}"
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
@@ -25,6 +30,13 @@ case "${OSTYPE:-}" in
   *)        err "Unsupported platform: ${OSTYPE:-unknown}"; exit 1 ;;
 esac
 log "Platform: $PLATFORM"
+
+# --- on Linux, auto-load /etc/claude-runner.env if present (server bootstrap pattern) ---
+RUNNER_ENV="${RUNNER_ENV:-/etc/claude-runner.env}"
+if [ "$PLATFORM" = linux ] && [ -f "$RUNNER_ENV" ]; then
+  log "Sourcing $RUNNER_ENV"
+  set -a; . "$RUNNER_ENV"; set +a
+fi
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -156,12 +168,26 @@ fi
 ok "vercel: $(vercel --version 2>&1 | head -1)"
 
 # =============================================================================
+# Helper: resolve a 1P item title to its ID, then read a field
+# =============================================================================
+op_read_field() {
+  # $1 = item title, $2 = field name (default: password)
+  local title="$1" field="${2:-password}"
+  local id
+  id=$(op item list --vault "$OP_VAULT" --format=json 2>/dev/null \
+        | jq -r --arg t "$title" '.[] | select(.title == $t) | .id' \
+        | head -1)
+  [ -n "$id" ] || return 1
+  op read "op://$OP_VAULT/$id/$field" 2>/dev/null
+}
+
+# =============================================================================
 # Configure 1P MCP plugin in ~/.claude.json
 # =============================================================================
 log "=== Configuring 1Password MCP plugin in $CLAUDE_JSON ==="
-SA_TOKEN=$(op read "$SA_TOKEN_REF" 2>/dev/null) || {
-  err "Could not read SA token from: $SA_TOKEN_REF"
-  err "Override path with: SA_TOKEN_REF='op://Vault/Item/field' bash setup.sh"
+SA_TOKEN=$(op_read_field "$SA_TOKEN_TITLE") || {
+  err "Could not read SA token item titled: $SA_TOKEN_TITLE (vault: $OP_VAULT)"
+  err "Override with: SA_TOKEN_TITLE='Other Title' OP_VAULT='Other' bash setup.sh"
   exit 1
 }
 [ -n "$SA_TOKEN" ] || { err "SA token came back empty"; exit 1; }
@@ -236,34 +262,130 @@ log "=== GitHub CLI auth ==="
 if gh auth status >/dev/null 2>&1; then
   ok "gh already authenticated as: $(gh api user --jq .login 2>/dev/null || echo unknown)"
 else
-  if GH_PAT=$(op read "$GH_PAT_REF" 2>/dev/null) && [ -n "$GH_PAT" ]; then
+  if GH_PAT=$(op_read_field "$GH_PAT_TITLE") && [ -n "$GH_PAT" ]; then
     if printf '%s' "$GH_PAT" | gh auth login --with-token >/dev/null 2>&1; then
-      ok "gh authenticated via 1P PAT (from $GH_PAT_REF)"
+      ok "gh authenticated via 1P PAT (item: $GH_PAT_TITLE)"
     else
       warn "gh auth login --with-token failed; run 'gh auth login' manually"
     fi
   else
-    warn "No GH PAT at $GH_PAT_REF — run 'gh auth login' manually"
+    warn "No 1P item titled '$GH_PAT_TITLE' in vault '$OP_VAULT' — run 'gh auth login' manually"
   fi
 fi
 
 # =============================================================================
-# Vercel CLI auth — set up env-var based on 1P (best-effort, doesn't modify shell rc)
+# Vercel CLI auth — set up env-var based on 1P (best-effort)
 # =============================================================================
 log "=== Vercel CLI auth ==="
 if vercel whoami >/dev/null 2>&1; then
   ok "vercel already authenticated as: $(vercel whoami 2>&1 | tail -1)"
 else
-  if VERCEL_TOKEN=$(op read "$VERCEL_TOKEN_REF" 2>/dev/null) && [ -n "$VERCEL_TOKEN" ]; then
-    if VERCEL_TOKEN="$VERCEL_TOKEN" vercel whoami >/dev/null 2>&1; then
-      ok "Vercel PAT in 1P validates. To use automatically, add to your shell rc:"
-      echo "    export VERCEL_TOKEN=\$(op read '$VERCEL_TOKEN_REF' 2>/dev/null)"
+  if VERCEL_TOKEN_VAL=$(op_read_field "$VERCEL_TOKEN_TITLE") && [ -n "$VERCEL_TOKEN_VAL" ]; then
+    if VERCEL_TOKEN="$VERCEL_TOKEN_VAL" vercel whoami >/dev/null 2>&1; then
+      ok "Vercel PAT in 1P validates. To auto-set in future shells:"
+      echo "    Add to ~/.zshrc or ~/.bashrc:"
+      echo "    export VERCEL_TOKEN=\$(op item get '$VERCEL_TOKEN_TITLE' --vault '$OP_VAULT' --fields password --reveal 2>/dev/null)"
     else
       warn "Vercel PAT in 1P didn't validate; run 'vercel login' manually"
     fi
   else
-    warn "No Vercel PAT at $VERCEL_TOKEN_REF — run 'vercel login' manually"
+    warn "No 1P item titled '$VERCEL_TOKEN_TITLE' in vault '$OP_VAULT' — run 'vercel login' manually"
   fi
+fi
+
+# =============================================================================
+# Anthropic API key — fetch from 1P, persist in /etc/claude-runner.env (Linux)
+# =============================================================================
+log "=== Anthropic API key ==="
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  ok "ANTHROPIC_API_KEY already set in env"
+else
+  if KEY_VAL=$(op_read_field "$ANTHROPIC_KEY_TITLE" credential) && [ -n "$KEY_VAL" ]; then
+    : "key found via 'credential' field"
+  elif KEY_VAL=$(op_read_field "$ANTHROPIC_KEY_TITLE" password) && [ -n "$KEY_VAL" ]; then
+    : "key found via 'password' field"
+  fi
+  if [ -n "${KEY_VAL:-}" ]; then
+    if [ "$PLATFORM" = linux ]; then
+      log "Persisting ANTHROPIC_API_KEY in $RUNNER_ENV"
+      $SUDO sed -i '/^ANTHROPIC_API_KEY=/d' "$RUNNER_ENV" 2>/dev/null || true
+      printf 'ANTHROPIC_API_KEY=%s\n' "$KEY_VAL" | $SUDO tee -a "$RUNNER_ENV" >/dev/null
+      $SUDO chmod 600 "$RUNNER_ENV"
+      export ANTHROPIC_API_KEY="$KEY_VAL"
+      ok "ANTHROPIC_API_KEY persisted in $RUNNER_ENV (mode 600)"
+    else
+      ok "Anthropic key found in 1P. To use, add to your shell rc:"
+      echo "    export ANTHROPIC_API_KEY=\$(op item get '$ANTHROPIC_KEY_TITLE' --vault '$OP_VAULT' --fields credential --reveal 2>/dev/null)"
+    fi
+    unset KEY_VAL
+  else
+    warn "No 1P item titled '$ANTHROPIC_KEY_TITLE' in vault '$OP_VAULT'"
+    warn "Either: store an Anthropic API key in 1P with that title (field 'credential' or 'password'),"
+    warn "        or run 'claude login' interactively after this script."
+  fi
+fi
+
+# =============================================================================
+# Linux only: install systemd service for always-running claude --remote-control
+# =============================================================================
+if [ "$PLATFORM" = linux ]; then
+  log "=== Installing claude-rc systemd service (always-on Remote Control) ==="
+  CLAUDE_BIN=$(command -v claude)
+  TMUX_BIN=$(command -v tmux)
+  log "claude binary: $CLAUDE_BIN"
+  log "tmux binary:   $TMUX_BIN"
+
+  $SUDO tee /etc/systemd/system/claude-rc.service >/dev/null <<UNIT
+[Unit]
+Description=Claude Code Remote Control session (in tmux)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=$RUNNER_ENV
+ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN --remote-control 2>&1 | tee -a /var/log/claude-rc.log'
+ExecStop=$TMUX_BIN kill-session -t claude-rc
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable claude-rc.service >/dev/null 2>&1
+  $SUDO systemctl restart claude-rc.service || warn "claude-rc.service failed to start; check 'journalctl -u claude-rc' and '/var/log/claude-rc.log'"
+  if $SUDO systemctl is-active --quiet claude-rc.service; then
+    ok "claude-rc.service is active and enabled (auto-starts on boot)"
+  else
+    warn "claude-rc.service installed but not active — likely needs Anthropic auth (claude login or ANTHROPIC_API_KEY)"
+  fi
+
+  # Also: a watchdog timer to restart the tmux session if claude exits inside it
+  $SUDO tee /etc/systemd/system/claude-rc-watchdog.service >/dev/null <<UNIT
+[Unit]
+Description=Restart claude-rc.service if claude exited inside the tmux session
+After=claude-rc.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '$TMUX_BIN has-session -t claude-rc 2>/dev/null && $TMUX_BIN list-panes -t claude-rc -F "#{pane_dead}" | grep -q 1 && /bin/systemctl restart claude-rc.service || true'
+UNIT
+  $SUDO tee /etc/systemd/system/claude-rc-watchdog.timer >/dev/null <<UNIT
+[Unit]
+Description=Periodic check on claude-rc tmux session
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=claude-rc-watchdog.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable --now claude-rc-watchdog.timer >/dev/null 2>&1
+  ok "claude-rc-watchdog.timer enabled (checks every 2 min, restarts if claude died inside tmux)"
 fi
 
 # =============================================================================
@@ -272,10 +394,19 @@ fi
 echo
 ok "Setup complete."
 echo
-echo "Manual steps remaining (one-time per machine):"
-echo "  1. claude login       — authenticate Claude Code to your Anthropic account"
-echo "  2. claude             — start a session; verify mobile app sees it"
-echo "  3. (Headless) tmux new -d -s claude 'claude --remote-control'   — persistent session"
-echo
-echo "Optional shell rc additions (only if you want auto-loaded env vars):"
-echo "  export VERCEL_TOKEN=\$(op read '$VERCEL_TOKEN_REF' 2>/dev/null)"
+if [ "$PLATFORM" = linux ]; then
+  echo "Hetzner-style setup notes:"
+  echo "  • /etc/claude-runner.env holds OP_SERVICE_ACCOUNT_TOKEN (and ANTHROPIC_API_KEY if found)."
+  echo "  • claude-rc.service runs 'claude --remote-control' in tmux; check with:"
+  echo "      systemctl status claude-rc"
+  echo "      tmux attach -t claude-rc      (Ctrl+b d to detach)"
+  echo "      journalctl -u claude-rc -f"
+  echo "      tail -f /var/log/claude-rc.log"
+  echo "  • To restart: sudo systemctl restart claude-rc"
+else
+  echo "Mac next steps:"
+  echo "  1. claude login                                  (one-time Anthropic OAuth in browser)"
+  echo "  2. claude                                        (start a session)"
+  echo "  3. /config inside Claude Code → enable Remote Control by default if not already"
+  echo "  4. Anthropic mobile app → your local session should appear in the picker"
+fi
