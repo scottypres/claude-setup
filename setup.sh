@@ -62,16 +62,46 @@ if [ "$PLATFORM" = mac ]; then
     if   [ -d /opt/homebrew ];      then eval "$(/opt/homebrew/bin/brew shellenv)"
     elif [ -d /usr/local/Homebrew ]; then eval "$(/usr/local/bin/brew shellenv)"
     fi
+    hash -r
   fi
+
   for pkg in jq node gh; do
-    if ! have "$pkg"; then log "brew install $pkg"; brew install "$pkg"; else ok "$pkg already present"; fi
+    if ! have "$pkg"; then
+      log "brew install $pkg"
+      brew install "$pkg"
+      hash -r
+    else
+      ok "$pkg already present ($(command -v "$pkg"))"
+    fi
   done
-  if ! have op; then log "brew install --cask 1password-cli"; brew install --cask 1password-cli; else ok "op already present"; fi
+
+  # 1Password CLI — installed as a Homebrew cask
+  if ! have op; then
+    log "brew install --cask 1password-cli"
+    brew install --cask 1password-cli || {
+      err "brew install --cask 1password-cli failed"
+      err "Try manually: brew install --cask 1password-cli"
+      err "Or follow https://developer.1password.com/docs/cli/get-started/"
+      exit 1
+    }
+    hash -r
+    if ! have op; then
+      err "Installed 1password-cli cask but 'op' is still not in PATH."
+      err "Try: hash -r; eval \"\$($([ -d /opt/homebrew ] && echo /opt/homebrew/bin || echo /usr/local/bin)/brew shellenv)\""
+      err "Or open a new terminal and re-run setup.sh."
+      exit 1
+    fi
+    ok "1Password CLI installed: $(command -v op) ($(op --version))"
+  else
+    ok "op already present ($(command -v op), $(op --version))"
+  fi
+
+  # 1Password desktop app — needed on Mac for Touch ID + CLI integration
   if [ ! -d "/Applications/1Password.app" ]; then
     log "brew install --cask 1password (desktop app, for Touch ID + CLI integration)"
     brew install --cask 1password || warn "Could not install 1P app; continuing"
   else
-    ok "1Password app already installed"
+    ok "1Password app already installed at /Applications/1Password.app"
   fi
 
 elif [ "$PLATFORM" = linux ]; then
