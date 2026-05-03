@@ -344,10 +344,13 @@ else
 fi
 
 # =============================================================================
-# Persist credentials from 1P into env (Linux: /etc/claude-runner.env; Mac: print)
+# Persist credentials from 1P into env
 # =============================================================================
-# Helper: resolve a 1P item's password OR credential field, persist to runner env
-# on Linux or print export hint on Mac. Idempotent.
+# Universally writes to ~/.claude/settings.json's `env` block, which Claude Code
+# loads on launch and propagates to MCP plugins (e.g. the github plugin reads
+# GITHUB_PERSONAL_ACCESS_TOKEN this way). On Linux additionally writes to
+# /etc/claude-runner.env so the systemd service picks up the same vars via
+# EnvironmentFile. Idempotent.
 persist_env_from_1p() {
   local var_name="$1" item_title="$2"
   local val
@@ -358,16 +361,29 @@ persist_env_from_1p() {
     warn "No 1P item titled '$item_title' in vault '$OP_VAULT' — skipping $var_name"
     return 1
   fi
+
+  # Write to settings.json env block (Claude Code reads this on launch)
+  local TMP
+  TMP=$(mktemp)
+  if [ -f "$CLAUDE_SETTINGS" ]; then
+    jq --arg k "$var_name" --arg v "$val" '.env = ((.env // {}) | .[$k] = $v)' "$CLAUDE_SETTINGS" > "$TMP"
+  else
+    jq -n --arg k "$var_name" --arg v "$val" '{env: {($k): $v}}' > "$TMP"
+  fi
+  jq empty "$TMP" >/dev/null
+  mv "$TMP" "$CLAUDE_SETTINGS"
+  chmod 600 "$CLAUDE_SETTINGS"
+  ok "$var_name written to $CLAUDE_SETTINGS env block"
+
+  # Linux: also persist to systemd EnvironmentFile so claude-rc.service sees it
   if [ "$PLATFORM" = linux ]; then
     $SUDO sed -i "/^${var_name}=/d" "$RUNNER_ENV" 2>/dev/null || true
     printf '%s=%s\n' "$var_name" "$val" | $SUDO tee -a "$RUNNER_ENV" >/dev/null
     $SUDO chmod 600 "$RUNNER_ENV"
-    export "$var_name=$val"
-    ok "$var_name persisted in $RUNNER_ENV (mode 600)"
-  else
-    ok "$var_name available in 1P. To export in your shell, add to ~/.zshrc:"
-    echo "    export $var_name=\$(op item get '$item_title' --vault '$OP_VAULT' --fields password --reveal 2>/dev/null)"
+    ok "$var_name also persisted in $RUNNER_ENV (mode 600)"
   fi
+
+  export "$var_name=$val"
   unset val
 }
 
