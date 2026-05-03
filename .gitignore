@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local-only files (just in case)
+*.local
+.env
+.env.*
+secrets/
