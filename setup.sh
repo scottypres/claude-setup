@@ -255,6 +255,23 @@ mv "$TMP" "$CLAUDE_SETTINGS"
 chmod 600 "$CLAUDE_SETTINGS"
 ok "Wrote $CLAUDE_SETTINGS (mode 600)"
 
+# Patch ~/.claude.json to suppress workspace-trust dialog (for / and $HOME) and
+# the first-run Remote Control onboarding prompt — both block headless startup.
+log "=== Patching $CLAUDE_JSON: suppress trust dialog + RC onboarding ==="
+TMP=$(mktemp)
+jq --arg home "$HOME" '
+  .projects = (.projects // {}) |
+  .projects["/"]   = ((.projects["/"]   // {}) + {hasTrustDialogAccepted: true}) |
+  .projects[$home] = ((.projects[$home] // {}) + {hasTrustDialogAccepted: true}) |
+  .hasUsedRemoteControl = true |
+  .remoteDialogSeen = true |
+  .remoteControlUpsellSeenCount = 999
+' "$CLAUDE_JSON" > "$TMP"
+jq empty "$TMP" >/dev/null
+mv "$TMP" "$CLAUDE_JSON"
+chmod 600 "$CLAUDE_JSON"
+ok "Trust + RC-onboarding flags set in $CLAUDE_JSON"
+
 # =============================================================================
 # gh CLI auth via 1P PAT (best-effort)
 # =============================================================================
@@ -335,6 +352,8 @@ if [ "$PLATFORM" = linux ]; then
   log "claude binary: $CLAUDE_BIN"
   log "tmux binary:   $TMUX_BIN"
 
+  # Session-name prefix: defaults to "Hetzner" for unattended servers; override via env.
+  RC_SESSION_PREFIX="${RC_SESSION_PREFIX:-Hetzner}"
   $SUDO tee /etc/systemd/system/claude-rc.service >/dev/null <<UNIT
 [Unit]
 Description=Claude Code Remote Control session (in tmux)
@@ -344,8 +363,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+WorkingDirectory=/root
 EnvironmentFile=$RUNNER_ENV
-ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN remote-control 2>&1 | tee -a /var/log/claude-rc.log'
+ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN remote-control --remote-control-session-name-prefix $RC_SESSION_PREFIX 2>&1 | tee -a /var/log/claude-rc.log'
 ExecStop=$TMUX_BIN kill-session -t claude-rc
 User=root
 
