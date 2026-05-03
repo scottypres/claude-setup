@@ -126,8 +126,11 @@ elif [ "$PLATFORM" = linux ]; then
   fi
 fi
 
-# Verify all prereqs are now in place
-for c in git jq op node npm gh tmux; do
+# Verify all prereqs are now in place. tmux is only needed on Linux (for the
+# claude-rc systemd service); Mac doesn't use it.
+REQUIRED=(git jq op node npm gh)
+[ "$PLATFORM" = linux ] && REQUIRED+=(tmux)
+for c in "${REQUIRED[@]}"; do
   have "$c" || { err "Missing required tool after install: $c"; exit 1; }
 done
 ok "All prereq tools present"
@@ -361,10 +364,16 @@ if [ "$PLATFORM" = linux ]; then
   log "claude binary: $CLAUDE_BIN"
   log "tmux binary:   $TMUX_BIN"
 
-  # Session naming: default to none (claude uses hostname as prefix). Override
-  # by setting RC_SESSION_PREFIX before running setup. Or rename sessions
-  # manually inside the running claude UI.
+  # Session naming. RC_SESSION_NAME sets a fixed name for the pre-created
+  # session (recommended for single-purpose servers — gives a stable identifier
+  # in the claude.ai session picker). RC_SESSION_PREFIX prefixes auto-spawned
+  # sessions in same-dir capacity mode. Defaults: hostname-based (claude's
+  # built-in behavior). Override either via env before running setup.
+  RC_NAME_ARG=""
   RC_PREFIX_ARG=""
+  if [ -n "${RC_SESSION_NAME:-}" ]; then
+    RC_NAME_ARG="--name $RC_SESSION_NAME"
+  fi
   if [ -n "${RC_SESSION_PREFIX:-}" ]; then
     RC_PREFIX_ARG="--remote-control-session-name-prefix $RC_SESSION_PREFIX"
   fi
@@ -379,7 +388,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/root
 EnvironmentFile=$RUNNER_ENV
-ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN remote-control $RC_PREFIX_ARG 2>&1 | tee -a /var/log/claude-rc.log'
+ExecStart=$TMUX_BIN new-session -d -s claude-rc '$CLAUDE_BIN remote-control $RC_NAME_ARG $RC_PREFIX_ARG 2>&1 | tee -a /var/log/claude-rc.log'
 ExecStop=$TMUX_BIN kill-session -t claude-rc
 User=root
 
