@@ -32,6 +32,11 @@ SUDO=""
 if [ "$PLATFORM" = linux ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
   SUDO="sudo"
 fi
+# SUDO_E expands to "sudo -E" when sudo is in use, empty otherwise. Used for
+# pipe-into-bash installers that need preserved env (e.g. NodeSource).
+SUDO_E="${SUDO:+sudo -E}"
+# Silence debconf prompts on apt-based distros for cleaner output
+export DEBIAN_FRONTEND=noninteractive
 
 # =============================================================================
 # Tier 2: install prerequisites
@@ -69,7 +74,7 @@ elif [ "$PLATFORM" = linux ]; then
   # Node.js 22 LTS via NodeSource if missing
   if ! have node; then
     log "Installing Node.js 22 LTS via NodeSource..."
-    curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO -E bash -
+    curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO_E bash -
     $SUDO apt-get install -y -qq nodejs
   else
     ok "node: $(node --version)"
