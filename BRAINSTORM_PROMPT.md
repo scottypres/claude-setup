@@ -26,7 +26,19 @@ machine (Mac or Linux), I run a single curl|bash one-liner, enter my
    freshly-cloned repo on a new machine, Claude already knows the
    project's history, decisions, and ongoing TODOs the same way it does
    on my Mac. This is the missing piece today.
-6. On Linux servers (Hetzner): `claude remote-control` running in tmux
+6. **Sensible CLAUDE.md defaults out of the box.**
+   - A **global `~/.claude/CLAUDE.md`** dropped in by `setup.sh` so every
+     session on every machine starts with my house rules (credentials
+     live in 1P Development vault, fetch via the 1P MCP plugin, never
+     commit secrets, prefer simplicity over architecture, etc.).
+   - A **per-repo CLAUDE.md template** (`templates/CLAUDE.md` in this
+     repo, or a `claude-init` helper) so starting a new project
+     scaffolds a working agreement modeled on giftasong's
+     "Working agreement for Claude" — bootstrap section, tooling
+     references, project-specific rules.
+   - Mechanism for keeping the global file in sync across machines (it's
+     the same problem as memory sync, possibly the same solution).
+7. On Linux servers (Hetzner): `claude remote-control` running in tmux
    under systemd with a watchdog, so the mobile app can attach when my
    laptop is asleep.
 
@@ -105,7 +117,13 @@ I'm specifically open about:
 4. **Encryption mechanics.** age vs git-crypt vs sops. Where the
    keypair lives (1P), how new machines get the decrypt key (during
    setup.sh), how rotation works.
-5. **What's out of scope** so we don't gold-plate.
+5. **CLAUDE.md strategy.** What goes in the global
+   `~/.claude/CLAUDE.md` vs the per-repo `CLAUDE.md`? How opinionated
+   should the per-repo template be? Should `setup.sh` overwrite an
+   existing global CLAUDE.md or merge? Is there a "sections" pattern
+   (e.g. a managed block delimited by markers that setup.sh can update,
+   leaving the rest of the file alone)?
+6. **What's out of scope** so we don't gold-plate.
 
 Walk me through the design space. Surface the tradeoffs I haven't
 thought of. Push back if any of my assumptions are wrong. I want to
